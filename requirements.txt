@@ -1,0 +1,12 @@
+Flask
+Flask-SQLAlchemy
+SQLAlchemy
+requests
+pyarrow
+numpy
+mpmath
+openpyxl
+pandas
+jupyter
+rpy2
+rpy2-arrow
