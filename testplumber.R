@@ -1,3 +1,22 @@
+library(readxl)
+library(writexl)
+library(jsonlite)
+library(readr)
+library(mirt)
+
+#* Log some information about the incoming request
+#* @filter logger
+function(req) {
+  print("LOGGER")
+  print(req)
+  cat(
+    as.character(Sys.time()), "-",
+    req$REQUEST_METHOD, req$PATH_INFO, "-",
+    req$HTTP_USER_AGENT, "@", req$REMOTE_ADDR, "\n"
+  )
+  plumber::forward()
+}
+
 #* Echo back the input
 #* @param msg The message to echo
 #* @get /echo
@@ -15,27 +34,32 @@ function(a, b) {
 }
 
 #* Return the sum of two numbers through request body
+#* @param a
+#* @param b
 #* @post /sumbod
-function(req, res) {
+function(req, res, a, b) {
+  print(a)
+  print(b)
   print(req$body)
-  print(req$body$a)
   print(req$body$a$value)
-  print(req$body$b$value)
-  as.numeric(req$body$a$value) + as.numeric(req$body$b$value)
+  print(req$bodyRaw)
+  # print(req$postBody$a)
+  # print(req$bodyRaw)
+  # print(req$body$a)
+  # print(req$body$a$value)
+  # print(req$body$b$value)
+  # as.numeric(req$body$a$value) + as.numeric(req$body$b$value)
+  list(summation = as.numeric(req$body$a$value))
 }
-
-library(readxl)
-library(writexl)
-library(jsonlite)
-library(readr)
-library(mirt)
 
 #* Return the IRT
 #* @post /data
-function(req, res) {
+function(req, res, model, itemtype, method, maxiter) {
   filename1 <- paste0(req$body$f$filename, sprintf("%04d", sample(9999, 1, TRUE)), sample(LETTERS, 1, TRUE), "-", format(Sys.time(), "%Y-%m-%d-%H-%M-%S"), ".xlsx")
   content <- req$body$f$value
   write_file(content, filename1)
+
+  print(paste0("Model: ", model, " - itemtype: ", itemtype, " - method: ", method, " - maxiter: ", maxiter))
 
   penalaran_matematika <- read_excel(filename1)
   penalaran_matematika[is.na(penalaran_matematika)] <- "-"
@@ -54,46 +78,17 @@ function(req, res) {
 
   # calculate the IRT
 
-  unimodel <- "F1 = 1-20"
   fitMirt <- mirt(
     data = binary_data,
-    model = unimodel,
-    itemtype = "3PL",
-    method = "MHRM",
-    technical = list(NCYCLES = 2000),
+    model = model,
+    itemtype = itemtype,
+    method = method,
+    technical = list(NCYCLES = as.numeric(maxiter)),
     verbose = TRUE
   )
 
   paramsMirt <- coef(fitMirt, IRTpars = TRUE, simplify = TRUE)
-  round(paramsMirt$items, 4)
-
-  fit4PL <- mirt(
-    data = binary_data,
-    model = unimodel,
-    itemtype = "4PL",
-    method = "QMCEM",
-    technical = list(NCYCLES = 100),
-    verbose = TRUE
-  )
-
-  params4PL <- coef(fit4PL,
-    IRTpars = TRUE,
-    simplify = TRUE
-  )
-
-  fit2PL <- mirt(
-    data = binary_data,
-    model = unimodel,
-    itemtype = "2PL",
-    method = "MHRM",
-    technical = list(NCYCLES = 100),
-    verbose = TRUE
-  )
-
-  params2PL <- coef(fit2PL,
-    IRTpars = TRUE,
-    simplify = TRUE
-  )
+  # round(paramsMirt$items, 4)
 
   irt_2pl_1 <- function(theta, a, b) {
     p <- 1 / (1 + exp(-1.702 * a * (theta - b)))
@@ -183,12 +178,31 @@ function(req, res) {
   }
 
   # output
-
   output_data <- data.frame(penalaran_matematika[1:n_students + 1, 1], pij)
   colnames(output_data) <- colnames(penalaran_matematika)
 
-  write_xlsx(dframe, paste0("output-", filename1))
+  for (i in 1:6) {
+    output_data[nrow(output_data) + 1, ] <- NA
+  }
 
-  res$status <- 201
-  list(msg = paste0("The message is: '", "'"), msg2 = paste0("The message2 is: '", "'"))
+  output_data[nrow(output_data) - 5, 1] <- "a"
+  output_data[nrow(output_data) - 4, 1] <- "b"
+  output_data[nrow(output_data) - 3, 1] <- "g"
+  output_data[nrow(output_data) - 2, 1] <- "u"
+  output_data[nrow(output_data) - 1, 1] <- "a1"
+  output_data[nrow(output_data), 1] <- "d"
+
+  for (j in 1:n_questions) {
+    output_data[nrow(output_data) - 5, j + 1] <- paramsMirt[["items"]][j, 1]
+    output_data[nrow(output_data) - 4, j + 1] <- paramsMirt[["items"]][j, 2]
+    output_data[nrow(output_data) - 3, j + 1] <- paramsMirt[["items"]][j, 3]
+    output_data[nrow(output_data) - 2, j + 1] <- paramsMirt[["items"]][j, 4]
+    output_data[nrow(output_data) - 1, j + 1] <- paramsMirt[["items"]][j, 5]
+    output_data[nrow(output_data), j + 1] <- paramsMirt[["items"]][j, 6]
+  }
+
+  write_xlsx(output_data, paste0("output-", filename1))
+
+  res$status <- 201 # created
+  return(list(msg = paste0("The message is: '", "'"), msg2 = paste0("The message2 is: '", "'")))
 }
