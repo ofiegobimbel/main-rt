@@ -1,8 +1,10 @@
 library(readxl)
 library(writexl)
+library(openxlsx)
 library(jsonlite)
 library(readr)
 library(mirt)
+library(stringr)
 
 #* Log some information about the incoming request
 #* @filter logger
@@ -54,155 +56,247 @@ function(req, res, a, b) {
 
 #* Return the IRT
 #* @post /data
-function(req, res, model, itemtype, method, maxiter) {
-  filename1 <- paste0(req$body$f$filename, sprintf("%04d", sample(9999, 1, TRUE)), sample(LETTERS, 1, TRUE), "-", format(Sys.time(), "%Y-%m-%d-%H-%M-%S"), ".xlsx")
+function(req, res) {
+  # ----------------------------------------------------------------------------
+  # get excel file and store it in folder
+  filename1 <- paste0(
+    req$body$f$filename, sprintf("%04d", sample(9999, 1, TRUE)),
+    sample(LETTERS, 1, TRUE), "-",
+    format(Sys.time(), "%Y-%m-%d-%H-%M-%S"),
+    ".xlsx"
+  )
   content <- req$body$f$value
   write_file(content, filename1)
 
-  print(paste0("Model: ", model, " - itemtype: ", itemtype, " - method: ", method, " - maxiter: ", maxiter))
+  # ----------------------------------------------------------------------------
+  # get another form data
+  model_param <- gsub("\\\\n", "\n", rawToChar(req$body$model$value))
+  itemtype_param <- rawToChar(req$body$itemtype$value)
+  method_param <- rawToChar(req$body$method$value)
+  maxiter_param <- as.integer(rawToChar(req$body$maxiter$value))
 
+  print(paste0("modelParam: ", model_param))
+  print(paste0("itemtypeParam: ", itemtype_param))
+  print(paste0("methodParam: ", method_param))
+  print(paste0("maxiterParam: ", maxiter_param))
+
+  # ----------------------------------------------------------------------------
+  # get data and transform to binary
   penalaran_matematika <- read_excel(filename1)
-  penalaran_matematika[is.na(penalaran_matematika)] <- "-"
+  data_dim <- dim(penalaran_matematika)
+  penalaran_matematika <- penalaran_matematika[1:(data_dim[1] - 1), ]
+  mapel <- read_excel(filename1,
+    col_names = FALSE,
+    range = paste0(
+      "Data!A", data_dim[1] + 1, ":",
+      int2col(data_dim[2]), data_dim[1] + 1
+    )
+  )
 
-  n_students <- nrow(penalaran_matematika) - 1
+  n_students <- nrow(penalaran_matematika)
   n_questions <- ncol(penalaran_matematika) - 1
+  binary_data <- data.matrix(
+    penalaran_matematika[1:n_students, 2:(n_questions + 1)]
+  )
 
-  binary_data <- matrix(NA, n_students, n_questions)
-  colnames(binary_data) <- colnames(penalaran_matematika)[2:(n_questions + 1)]
+  # ----------------------------------------------------------------------------
+  # get mapel array
+  mapel_arr <- list()
+  mapel_arr_question <- list()
 
-  for (x in 1:n_students) {
-    for (y in 1:n_questions) {
-      binary_data[x, y] <- if ((penalaran_matematika[1, y + 1] == penalaran_matematika[x + 1, y + 1])[1]) 1 else 0
+  for (i in 2:(data_dim[2])) {
+    if (!mapel[[i]] %in% mapel_arr) {
+      mapel_arr <- append(mapel_arr, mapel[[i]])
+      mapel_arr_question <- append(mapel_arr_question, i - 1)
+    } else {
+      idx <- which(mapel_arr == mapel[[i]])
+      mapel_arr_question[[idx]] <- append(mapel_arr_question[[idx]], i - 1)
     }
   }
 
+  # ----------------------------------------------------------------------------
   # calculate the IRT
+  k <- str_count(model_param, "=")
 
   fitMirt <- mirt(
     data = binary_data,
-    model = model,
-    itemtype = itemtype,
-    method = method,
-    technical = list(NCYCLES = as.numeric(maxiter)),
+    model = mirt.model(model_param),
+    itemtype = itemtype_param,
+    method = method_param,
+    technical = list(NCYCLES = as.integer(maxiter_param)),
     verbose = TRUE
   )
-
   paramsMirt <- coef(fitMirt, IRTpars = TRUE, simplify = TRUE)
-  # round(paramsMirt$items, 4)
+  theta_est <- fscores(fitMirt, method = "ML")
 
+  # ----------------------------------------------------------------------------
+  # define probability function for 2PL, 3PL, 4PL
   irt_2pl_1 <- function(theta, a, b) {
     p <- 1 / (1 + exp(-1.702 * a * (theta - b)))
     p
   }
-
   irt_2pl_2 <- function(theta, a, b) {
     p <- 1 / (1 + exp(-1.702 * (a * theta + b)))
     p
   }
-
   irt_3pl_1 <- function(theta, a, b, c) {
     p <- c + (1 - c) / (1 + exp(-1.702 * a * (theta - b)))
     p
   }
-
   irt_3pl_2 <- function(theta, a, b, c) {
     p <- c + (1 - c) / (1 + exp(-1.702 * (a * theta + b)))
     p
   }
-
   irt_4pl_1 <- function(theta, a, b, c, d) {
     p <- c + ((d - c) * ((exp(1.702 * a * (theta - b)) / (1 + exp(-1.702 * (a * (theta - b)))))))
     p
   }
-
   irt_4pl_2 <- function(theta, a, b, c, d) {
     p <- c + ((d - c) * ((exp(1.702 * (a * theta + b)) / (1 + exp(-1.702 * (a * theta + b))))))
     p
   }
 
-  theta_est <- fscores(fitMirt, method = "ML")
+  # ----------------------------------------------------------------------------
+  # calculate the probability matrix between students and questions
   pij <- matrix(NA, n_students, n_questions)
+  p_dan_ceeb <- matrix(0, n_students, 2 * k)
+  mean_p <- vector("list", k)
+  stdev_p <- vector("list", k)
 
-  for (i in 1:n_subjects) {
-    for (j in 1:n_items) {
-      if (itemtype == "3PL") {
-        if (paramsMirt$items[j, 3] > 0) {
-          pij[i, j] <- irt_3pl_1(
-            theta_est[i],
-            paramsMirt$items[j, 1],
-            paramsMirt$items[j, 2],
-            paramsMirt$items[j, 3]
-          )
+  for (i in 1:n_students) {
+    for (j in 1:n_questions) {
+      z <- which(mapel_arr == mapel[[j + 1]])
+
+      if (itemtype_param == "3PL") {
+        pij[i, j] <- irt_3pl_1(
+          theta_est[i, z],
+          paramsMirt$items[j, z],
+          paramsMirt$items[j, k + 1],
+          paramsMirt$items[j, k + 2]
+        )
+      } else if (itemtype_param == "4PL") {
+        pij[i, j] <- irt_4pl_1(
+          theta_est[i, z],
+          paramsMirt$items[j, z],
+          paramsMirt$items[j, k + 1],
+          paramsMirt$items[j, k + 2],
+          paramsMirt$items[j, k + 3]
+        )
+      } else if (itemtype_param == "2PL") {
+        pij[i, j] <- irt_2pl_1(
+          theta_est[i, z],
+          paramsMirt$items[j, z],
+          paramsMirt$items[j, k + 1]
+        )
+      }
+
+      p_dan_ceeb[i, z] <- p_dan_ceeb[i, z] + pij[i, j]
+    }
+  }
+
+  for (i in 1:k) {
+    p_dan_ceeb[, i] <- p_dan_ceeb[, i] / length(mapel_arr_question[[i]])
+    mean_p[[i]] <- mean(p_dan_ceeb[, i])
+    stdev_p[[i]] <- sd(p_dan_ceeb[, i])
+    p_dan_ceeb[, i + k] <- 500 + 100 * ((p_dan_ceeb[, i] - mean_p[[i]]) / stdev_p[[i]])
+  }
+
+  # ----------------------------------------------------------------------------
+  # generate the output of xls
+  n_koef <- 0
+  colname2 <- c()
+
+  if (itemtype_param == "2PL") {
+    n_koef <- 2
+    colname2 <- c("MATA UJI", "a", "b", "daya beda", "taraf sukar", "k")
+  } else if (itemtype_param == "3PL") {
+    n_koef <- 3
+    colname2 <- c(
+      "MATA UJI", "a", "b", "g", "daya beda", "taraf sukar",
+      "tebakan semu", "k"
+    )
+  } else if (itemtype_param == "4PL") {
+    n_koef <- 3
+    colname2 <- c(
+      "MATA UJI", "a", "b", "g", "u", "daya beda",
+      "taraf sukar", "tebakan semu", "k"
+    )
+  }
+
+  output_data <- data.frame(
+    penalaran_matematika[1:n_students, 1], pij,
+    p_dan_ceeb
+  )
+  colnames(output_data) <- c(
+    colnames(penalaran_matematika),
+    paste0("p - ", mapel_arr), paste0("ceeb - ", mapel_arr)
+  )
+  n_param_irt <- dim(paramsMirt$items)[2]
+
+  output_data_2 <- data.frame(
+    paste0("KPU", 1:n_questions),
+    matrix(NA, nrow = n_questions, ncol = n_koef + 3),
+    matrix(0.2, nrow = n_questions, ncol = 1)
+  )
+  colnames(output_data_2) <- colname2
+
+  for (i in 1:n_questions) {
+    z <- which(mapel_arr == mapel[[i + 1]])
+
+    for (j in 1:n_koef) {
+      if (j == 1) {
+        output_data_2[i, j + 1] <- paramsMirt$items[i, z]
+
+        if (paramsMirt$items[i, z] < 0.31) {
+          output_data_2[i, j + 1 + n_koef] <- "Perlu Direvisi"
+        } else if (paramsMirt$items[i, z] <= 0.66) {
+          output_data_2[i, j + 1 + n_koef] <- "Jelek"
+        } else if (paramsMirt$items[i, z] <= 1.34) {
+          output_data_2[i, j + 1 + n_koef] <- "Cukup"
+        } else if (paramsMirt$items[i, z] <= 1.69) {
+          output_data_2[i, j + 1 + n_koef] <- "Baik"
         } else {
-          pij[i, j] <- irt_3pl_2(
-            theta_est[i],
-            paramsMirt$items[j, 5],
-            paramsMirt$items[j, 6],
-            paramsMirt$items[j, 3]
-          )
+          output_data_2[i, j + 1 + n_koef] <- "Sangat Baik"
         }
-      } else if (itemtype == "4PL") {
-        if (paramsMirt$items[j, 3] > 0) {
-          pij[i, j] <- irt_4pl_1(
-            theta_est[i],
-            paramsMirt$items[j, 1],
-            paramsMirt$items[j, 2],
-            paramsMirt$items[j, 3],
-            paramsMirt$items[j, 4]
-          )
-        } else {
-          pij[i, j] <- irt_4pl_2(
-            theta_est[i],
-            paramsMirt$items[j, 5],
-            paramsMirt$items[j, 6],
-            paramsMirt$items[j, 3],
-            paramsMirt$items[j, 4]
-          )
+      } else {
+        output_data_2[i, j + 1] <- paramsMirt$items[i, k + j - 1]
+
+        if (j == 2) {
+          if (paramsMirt$items[i, k + j - 1] < -2) {
+            output_data_2[i, j + 1 + n_koef] <- "Sangat Mudah"
+          } else if (paramsMirt$items[i, k + j - 1] <= -1) {
+            output_data_2[i, j + 1 + n_koef] <- "Mudah"
+          } else if (paramsMirt$items[i, k + j - 1] <= 1) {
+            output_data_2[i, j + 1 + n_koef] <- "Sedang"
+          } else if (paramsMirt$items[i, k + j - 1] <= 2) {
+            output_data_2[i, j + 1 + n_koef] <- "Sulit"
+          } else {
+            output_data_2[i, j + 1 + n_koef] <- "Sangat Sulit"
+          }
         }
-      } else if (itemtype == "2PL") {
-        if (paramsMirt$items[j, 3] == 0) {
-          pij[i, j] <- irt_2pl_1(
-            theta_est[i],
-            paramsMirt$items[j, 1],
-            paramsMirt$items[j, 2]
-          )
-        } else {
-          pij[i, j] <- irt_2pl_2(
-            theta_est[i],
-            paramsMirt$items[j, 5],
-            paramsMirt$items[j, 6]
-          )
+
+        if (j == 3) {
+          if (paramsMirt$items[i, k + j - 1] < 0.2) {
+            output_data_2[i, j + 1 + n_koef] <- "Baik"
+          } else {
+            output_data_2[i, j + 1 + n_koef] <- "Tidak Baik"
+          }
         }
       }
     }
   }
 
-  # output
-  output_data <- data.frame(penalaran_matematika[1:n_students + 1, 1], pij)
-  colnames(output_data) <- colnames(penalaran_matematika)
+  write_xlsx(
+    list(skor_kpu = output_data, irt_kpu = output_data_2),
+    paste0("output-", filename1)
+  )
 
-  for (i in 1:6) {
-    output_data[nrow(output_data) + 1, ] <- NA
-  }
 
-  output_data[nrow(output_data) - 5, 1] <- "a"
-  output_data[nrow(output_data) - 4, 1] <- "b"
-  output_data[nrow(output_data) - 3, 1] <- "g"
-  output_data[nrow(output_data) - 2, 1] <- "u"
-  output_data[nrow(output_data) - 1, 1] <- "a1"
-  output_data[nrow(output_data), 1] <- "d"
-
-  for (j in 1:n_questions) {
-    output_data[nrow(output_data) - 5, j + 1] <- paramsMirt[["items"]][j, 1]
-    output_data[nrow(output_data) - 4, j + 1] <- paramsMirt[["items"]][j, 2]
-    output_data[nrow(output_data) - 3, j + 1] <- paramsMirt[["items"]][j, 3]
-    output_data[nrow(output_data) - 2, j + 1] <- paramsMirt[["items"]][j, 4]
-    output_data[nrow(output_data) - 1, j + 1] <- paramsMirt[["items"]][j, 5]
-    output_data[nrow(output_data), j + 1] <- paramsMirt[["items"]][j, 6]
-  }
-
-  write_xlsx(output_data, paste0("output-", filename1))
-
+  # ----------------------------------------------------------------------------
+  # success response
   res$status <- 201 # created
-  return(list(msg = paste0("The message is: '", "'"), msg2 = paste0("The message2 is: '", "'")))
+  return(list(
+    msg = paste0("The message is: '", "'"),
+    msg2 = paste0("The message2 is: '", "'")
+  ))
 }
