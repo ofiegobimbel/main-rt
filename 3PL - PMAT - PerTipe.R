@@ -8,13 +8,13 @@ library(stringr)
 # -----------------------------------------------------------------
 # get data and transform
 
-penalaran_matematika <- read_excel("D:/Normalisasi Data Rstudio/Detil-Jawaban-TO-02191-02192.xlsx", sheet = "KPU-Biner")
+penalaran_matematika <- read_excel("D:/Normalisasi Data Rstudio/hasil-jawaban-tobk-minus1.xlsx")
 data_dim <- dim(penalaran_matematika)
 penalaran_matematika <- penalaran_matematika[1: (data_dim[1]-3),]
 nama_koloms <- colnames(penalaran_matematika)[4:data_dim[2]]
-mapel <- read_excel("D:/Normalisasi Data Rstudio/Detil-Jawaban-TO-02191-02192.xlsx", col_names = FALSE, range = paste0("KPU-Biner!D", data_dim[1]-1, ":", int2col(data_dim[2]), data_dim[1]-1))
-tipe_jawaban <- read_excel("D:/Normalisasi Data Rstudio/Detil-Jawaban-TO-02191-02192.xlsx", col_names = FALSE, range = paste0("KPU-Biner!D", data_dim[1], ":", int2col(data_dim[2]), data_dim[1]))
-tipe_soal <- read_excel("D:/Normalisasi Data Rstudio/Detil-Jawaban-TO-02191-02192.xlsx", col_names = FALSE, range = paste0("KPU-Biner!D", data_dim[1]+1, ":", int2col(data_dim[2]), data_dim[1]+1))
+mapel <- read_excel("D:/Normalisasi Data Rstudio/hasil-jawaban-tobk-minus1.xlsx", col_names = FALSE, range = paste0("Data!D", data_dim[1]-1, ":", int2col(data_dim[2]), data_dim[1]-1))
+tipe_jawaban <- read_excel("D:/Normalisasi Data Rstudio/hasil-jawaban-tobk-minus1.xlsx", col_names = FALSE, range = paste0("Data!D", data_dim[1], ":", int2col(data_dim[2]), data_dim[1]))
+tipe_soal <- read_excel("D:/Normalisasi Data Rstudio/hasil-jawaban-tobk-minus1.xlsx", col_names = FALSE, range = paste0("Data!D", data_dim[1]+1, ":", int2col(data_dim[2]), data_dim[1]+1))
 # print(penalaran_matematika)
 # print(colnames(penalaran_matematika)[2:86])
 
@@ -52,15 +52,45 @@ for (i in 4:(data_dim[2]-1)) {
 # transform data to binary
 
 binary_data <- data.matrix(penalaran_matematika[1:n_students, 4:(n_questions+3)])
-data_dicho <- binary_data[,which(tipe_jawaban == 1)]
-data_poly <- binary_data[,which(tipe_jawaban == 2)]
-
 # print(binary_data)
 # print(length(binary_data[1:n_students,1])
 # binary_data[1,1] = 1
 # print(binary_data[,1])
 
 itemstats(binary_data)
+
+# -----------------------------------------------------------------
+# split binary data to each question type to check if all type is empty
+
+for (i in 1:n_students) {
+  batasBawah <- 0
+  
+  for (j in 1:max(tipe_soal)) {
+    answers <- binary_data[i, which(tipe_soal == j)]
+    nEmptyAnswer <- length(which(answers == -1))
+    
+    if (nEmptyAnswer == length(which(tipe_soal == j))) {
+      binary_data[i, which(tipe_soal == j)] = NA
+    } else if (nEmptyAnswer != 0) {
+      for (k in (batasBawah+which(answers == -1))) {
+        if (tipe_jawaban[k] == 1) {
+          binary_data[i, k] = 0
+        } else {
+          binary_data[i, k] = 1
+        }
+      }
+    }
+    
+    batasBawah <- batasBawah + length(answers)
+  }
+}
+
+
+# -----------------------------------------------------------------
+# split binary data to dicho and poly (answer type)
+
+data_dicho <- binary_data[,which(tipe_jawaban == 1)]
+data_poly <- binary_data[,which(tipe_jawaban == 2)]
 
 
 
@@ -163,7 +193,6 @@ for (i in 1:n_questions) {
 }
 
 
-
 # -----------------------------------------------------------------
 # calculate the Factor Analysis
 
@@ -230,7 +259,7 @@ k2 <- str_count(multimodel, "=")
 fitMirtPoly <- mirt(data = data_poly, 
                 model = mirt.model(multimodel),
                 itemtype = "graded",
-                technical = list(NCYCLES=50, MAXQUAD=100000),
+                technical = list(NCYCLES=150, MAXQUAD=100000),
                 verbose = TRUE)
 
 paramsMirtPoly <- coef(fitMirtPoly, IRTpars = TRUE, simplify = TRUE)
@@ -357,53 +386,59 @@ for (i in 1:n_students) {
     # z <- which(mapel_arr == mapel[[j]])
     pij[i, j] <- 0
     
-    if ( j %in% which(tipe_jawaban == 1) ) {
-      
-      if (itemtype == "3PL") {
-        pij[i, j] <- irt_3pl_1(
-          theta_est[[i, idx_params[j]]],
-          paramsMirt$items[nama_koloms[j], idx_params[j]],
-          paramsMirt$items[nama_koloms[j], k + 1],
-          paramsMirt$items[nama_koloms[j], k + 2]
-        )
-      } else if (itemtype == "4PL") {
-        pij[i, j] <- irt_4pl_1(
-          theta_est[[i, idx_params[j]]],
-          paramsMirt$items[nama_koloms[j], idx_params[j]],
-          paramsMirt$items[nama_koloms[j], k + 1],
-          paramsMirt$items[nama_koloms[j], k + 2],
-          paramsMirt$items[nama_koloms[j], k + 3]
-        )
-      } else if (itemtype == "2PL") {
-        pij[i, j] <- irt_2pl_1(
-          theta_est[[i, idx_params[j]]],
-          paramsMirt$items[nama_koloms[j], idx_params[j]],
-          paramsMirt$items[nama_koloms[j], k + 1]
+    if (!is.na(binary_data[i, nama_koloms[j]])) {
+    
+      if ( j %in% which(tipe_jawaban == 1) ) {
+        
+        if (itemtype == "3PL") {
+          pij[i, j] <- irt_3pl_1(
+            theta_est[[i, idx_params[j]]],
+            paramsMirt$items[nama_koloms[j], idx_params[j]],
+            paramsMirt$items[nama_koloms[j], k + 1],
+            paramsMirt$items[nama_koloms[j], k + 2]
+          )
+        } else if (itemtype == "4PL") {
+          pij[i, j] <- irt_4pl_1(
+            theta_est[[i, idx_params[j]]],
+            paramsMirt$items[nama_koloms[j], idx_params[j]],
+            paramsMirt$items[nama_koloms[j], k + 1],
+            paramsMirt$items[nama_koloms[j], k + 2],
+            paramsMirt$items[nama_koloms[j], k + 3]
+          )
+        } else if (itemtype == "2PL") {
+          pij[i, j] <- irt_2pl_1(
+            theta_est[[i, idx_params[j]]],
+            paramsMirt$items[nama_koloms[j], idx_params[j]],
+            paramsMirt$items[nama_koloms[j], k + 1]
+          )
+        }
+      } else {
+        # poly
+        unikArray <- sort(unique(binary_data[, nama_koloms[j]]))
+          
+        pij[i, j] <- irt_graded(
+          which(unikArray == binary_data[i, nama_koloms[j]]),
+          length(unikArray),
+          theta_est_poly[[i, idx_params[j]]],
+          paramsMirtPoly$items[nama_koloms[j], (k2+1):ncol(paramsMirtPoly$items)],
+          paramsMirtPoly$items[nama_koloms[j], idx_params[j]]
         )
       }
+      
+      p_dan_ceeb[i, tipe_soal[[j]]] <- p_dan_ceeb[i, tipe_soal[[j]]] + pij[i, j]
     } else {
-      # poly
-      unikArray <- sort(unique(binary_data[, nama_koloms[j]]))
-        
-      pij[i, j] <- irt_graded(
-        which(unikArray == binary_data[i, nama_koloms[j]]),
-        length(unikArray),
-        theta_est_poly[[i, idx_params[j]]],
-        paramsMirtPoly$items[nama_koloms[j], (k2+1):ncol(paramsMirtPoly$items)],
-        paramsMirtPoly$items[nama_koloms[j], idx_params[j]]
-      )
+      p_dan_ceeb[i, tipe_soal[[j]]] <- 0
     }
-    
-    p_dan_ceeb[i, tipe_soal[[j]]] <- p_dan_ceeb[i, tipe_soal[[j]]] + pij[i, j]
   }
 }
 
 for (i in 1:tipe_soal[[n_questions]]) {
   p_dan_ceeb[,i] <- p_dan_ceeb[,i]/length(which(tipe_soal == i))
   
-  mean_p[[i]] <- mean(p_dan_ceeb[,i])
-  stdev_p[[i]] <- sd(p_dan_ceeb[,i])
+  mean_p[[i]] <- mean(p_dan_ceeb[which(p_dan_ceeb[,i] != 0),i])
+  stdev_p[[i]] <- sd(p_dan_ceeb[which(p_dan_ceeb[,i] != 0),i])
   p_dan_ceeb[,i+tipe_soal[[n_questions]]] <- 500 + 100 * ( (p_dan_ceeb[,i] - mean_p[[i]])/stdev_p[[i]] )
+  p_dan_ceeb[which(p_dan_ceeb[,i] == 0),i+tipe_soal[[n_questions]]] <- 0
 }
 
 
@@ -482,7 +517,7 @@ for (i in 1:n_questions) {
 }
 
 
-write_xlsx(list(skor_kpu = output_data), paste0("output-new1-to-2191-kpu.xlsx"))
+write_xlsx(list(skor_kpu = output_data), paste0("output-new1-to-73-nullcheck.xlsx"))
 
 
 
